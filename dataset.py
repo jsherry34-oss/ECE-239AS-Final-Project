@@ -8,25 +8,45 @@ from tqdm import tqdm
 from config import SCENARIOS, K_SAMPLES
 from signals import generate_snapshot, extract_autocorr_features
 from beamformers import calc_nsb_weights, calc_mvdr_weights, weights_to_target
+from itertools import combinations
+
+_VALID_ANGLE_CACHE = {}
 
 
-def sample_valid_angles(cfg, rng: np.random.Generator):
+def _get_valid_angle_pool(cfg, min_target_sep_deg: float, min_jammer_sep_deg: float):
+    key = (cfg.name, min_target_sep_deg, min_jammer_sep_deg)
+    if key in _VALID_ANGLE_CACHE:
+        return _VALID_ANGLE_CACHE[key]
+
+    d_grid = np.arange(cfg.theta_d_range[0], cfg.theta_d_range[1] + 1, cfg.theta_d_step, dtype=np.float64)
+    i_grid = np.arange(cfg.theta_i_range[0], cfg.theta_i_range[1] + 1, cfg.theta_i_step, dtype=np.float64)
+    num_var_i = cfg.Q - len(cfg.fixed_interferers)
+    fixed = list(cfg.fixed_interferers)
+
+    valid_i_sets = []
+    for var_i in combinations(i_grid, num_var_i):
+        theta_i = sorted(list(var_i) + fixed)
+        if all(theta_i[k + 1] - theta_i[k] >= min_jammer_sep_deg for k in range(len(theta_i) - 1)):
+            valid_i_sets.append(theta_i)
+
+    pool = []
+    for theta_d in d_grid:
+        td = float(theta_d)
+        for theta_i in valid_i_sets:
+            if all(abs(td - ti) >= min_target_sep_deg for ti in theta_i):
+                pool.append((td, theta_i))
+
+    _VALID_ANGLE_CACHE[key] = pool
+    return pool
+
+def sample_valid_angles(cfg, rng: np.random.Generator, min_target_sep_deg: float = 15.0, min_jammer_sep_deg: float = 5.0):    
     """
     uniformly sample discrete DOAs for desired signal and Q interferers
     ensuring no two angles collide
     """
-    d_grid = np.arange(cfg.theta_d_range[0], cfg.theta_d_range[1] + 1, cfg.theta_d_step, dtype=np.float64)
-    i_grid = np.arange(cfg.theta_i_range[0], cfg.theta_i_range[1] + 1, cfg.theta_i_step, dtype=np.float64)
-    num_var_i = cfg.Q - len(cfg.fixed_interferers)
-
-    while True:
-        theta_d = float(rng.choice(d_grid))
-        var_i = [float(x) for x in rng.choice(i_grid, size=num_var_i, replace=False)]
-        theta_i = var_i + list(cfg.fixed_interferers)
-        all_angles = [theta_d] + theta_i
-        # Require distinct angles
-        if len(set(all_angles)) == len(all_angles):
-            return theta_d, theta_i
+    pool = _get_valid_angle_pool(cfg, min_target_sep_deg, min_jammer_sep_deg)
+    idx = int(rng.integers(0, len(pool)))
+    return pool[idx]
 
 
 def generate_dataset(
